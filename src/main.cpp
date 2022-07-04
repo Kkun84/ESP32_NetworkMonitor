@@ -40,15 +40,9 @@ StaticJsonDocument<JSON_OBJECT_SIZE(2) + JSON_OBJECT_SIZE(2) + JSON_OBJECT_SIZE(
 JsonObject json_contents;
 CONNECTION_STATE connection_state = CONNECTION_STATE::INITIAL;
 
-const time_t generate_id(void);
 void IRAM_ATTR on_timer();
 void init_pin();
 void init_timer();
-
-const time_t generate_id(void)
-{
-    return time(NULL);
-}
 
 void output_sound(SOUND_STATE set_sound_state = SOUND_STATE::NONE)
 {
@@ -144,9 +138,9 @@ void setup()
 
     json_spread_sheet["id"] = SPREAD_SHEET_ID;
     json_spread_sheet["sheet"] = SPREAD_SHEET_SHEET;
-    json_contents["start_client_unixtime"] = generate_id();
+    json_contents["start_client_unixtime"] = time(NULL)
 
-    timerAlarmEnable(timer);
+        timerAlarmEnable(timer);
 }
 
 void loop()
