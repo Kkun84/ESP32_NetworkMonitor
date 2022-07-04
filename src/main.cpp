@@ -8,16 +8,108 @@
 #define PIN_SPEAKER_OUTPUT 33
 #define PIN_DEBUG_INPUT 23
 
-const time_t generate_id(void);
+enum class LEDC_CHANNEL
+{
+    SPEAKER
+};
+
+enum class TIMER_NUM
+{
+    SPEAKER
+};
+
+enum class SOUND_STATE
+{
+    INITIAL,
+    PHASE_1,
+    PHASE_2,
+    OFF,
+    NONE,
+};
+
+enum class CONNECTION_STATE
+{
+    INITIAL,
+    CONNECTING,
+    CONNECTED,
+    BROKEN,
+};
 
 HTTPClient http_client;
-
 StaticJsonDocument<JSON_OBJECT_SIZE(2) + JSON_OBJECT_SIZE(2) + JSON_OBJECT_SIZE(4)> doc;
 JsonObject json_contents;
+CONNECTION_STATE connection_state = CONNECTION_STATE::INITIAL;
+
+const time_t generate_id(void);
+void IRAM_ATTR on_timer();
+void init_pin();
+void init_timer();
 
 const time_t generate_id(void)
 {
     return time(NULL);
+}
+
+void output_sound(SOUND_STATE set_sound_state = SOUND_STATE::NONE)
+{
+    static SOUND_STATE sound_state = SOUND_STATE::OFF;
+
+    if (set_sound_state != SOUND_STATE::NONE)
+    {
+        sound_state = set_sound_state;
+    }
+
+    switch (sound_state)
+    {
+    case SOUND_STATE::INITIAL:
+    case SOUND_STATE::PHASE_1:
+        if (connection_state == CONNECTION_STATE::CONNECTING)
+        {
+            ledcWriteTone(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), 0);
+        }
+        else
+        {
+            ledcWriteNote(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), NOTE_B, 4);
+        }
+        sound_state = SOUND_STATE::PHASE_2;
+        break;
+    case SOUND_STATE::PHASE_2:
+        if (connection_state == CONNECTION_STATE::CONNECTING)
+        {
+            ledcWriteTone(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), 0);
+        }
+        else
+        {
+            ledcWriteNote(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), NOTE_G, 4);
+        }
+        sound_state = SOUND_STATE::PHASE_1;
+        break;
+    case SOUND_STATE::OFF:
+        ledcWriteTone(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), 0);
+        break;
+    default:
+        break;
+    }
+}
+
+hw_timer_t *timer = NULL;
+void IRAM_ATTR on_timer()
+{
+    output_sound();
+}
+
+void init_pin()
+{
+    pinMode(PIN_SPEAKER_OUTPUT, OUTPUT);
+    pinMode(PIN_DEBUG_INPUT, INPUT_PULLUP);
+    ledcAttachPin(PIN_SPEAKER_OUTPUT, static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER));
+}
+
+void init_timer()
+{
+    timer = timerBegin(static_cast<uint8_t>(TIMER_NUM::SPEAKER), getApbFrequency() / 1000 * 1000 * 1000, true);
+    timerAttachInterrupt(timer, &on_timer, true);
+    timerAlarmWrite(timer, 5000, true);
 }
 
 void setup()
@@ -25,11 +117,8 @@ void setup()
     Serial.begin(115200);
     delay(100);
 
-    pinMode(PIN_SPEAKER_OUTPUT, OUTPUT);
-    pinMode(PIN_DEBUG_INPUT, INPUT_PULLUP);
-
-    ledcSetup(0, 440, 8);
-    ledcAttachPin(PIN_SPEAKER_OUTPUT, 0);
+    init_pin();
+    init_timer();
 
     Serial.print("\nConnecting...");
 
@@ -56,12 +145,15 @@ void setup()
     json_spread_sheet["id"] = SPREAD_SHEET_ID;
     json_spread_sheet["sheet"] = SPREAD_SHEET_SHEET;
     json_contents["start_client_unixtime"] = generate_id();
+
+    timerAlarmEnable(timer);
 }
 
 void loop()
 {
     static unsigned long last_millis = millis();
     static unsigned long failed_count = 0;
+    static CONNECTION_STATE last_connection_state = CONNECTION_STATE::INITIAL;
 
     const unsigned long new_millis = millis();
     const unsigned long interval_millis = new_millis - last_millis;
@@ -76,28 +168,39 @@ void loop()
     serializeJson(doc, json_string);
 
     int status_code = 0;
+    connection_state = CONNECTION_STATE::CONNECTING;
     if (digitalRead(PIN_DEBUG_INPUT))
     {
         status_code = http_client.POST(json_string);
     }
-    Serial.printf("POST %d|%s\n", status_code, json_string.c_str());
-    if (status_code == 200)
+
+    connection_state = (status_code == 200) ? CONNECTION_STATE::CONNECTED : CONNECTION_STATE::BROKEN;
+
+    switch (connection_state)
     {
-        ledcWrite(0, 0x00);
+    case CONNECTION_STATE::CONNECTED:
+        if (last_connection_state == CONNECTION_STATE::BROKEN)
+        {
+            output_sound(SOUND_STATE::OFF);
+        }
         last_millis = new_millis;
         failed_count = 0;
-    }
-    else
-    {
-        if ((interval_millis % 2000) < 500)
+        break;
+    case CONNECTION_STATE::BROKEN:
+        if (last_connection_state == CONNECTION_STATE::CONNECTED)
         {
-            ledcWrite(0, 0x80);
-        }
-        else
-        {
-            ledcWrite(0, 0x00);
+            timerWrite(timer, 0);
+            output_sound(SOUND_STATE::INITIAL);
         }
         failed_count += 1;
         delay(10);
+        break;
+    default:
+        return;
+        break;
     }
+
+    last_connection_state = connection_state;
+
+    // Serial.printf("POST %d|%s\n", status_code, json_string.c_str());
 }
