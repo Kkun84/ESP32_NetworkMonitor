@@ -23,6 +23,7 @@ enum class SOUND_STATE
     INITIAL,
     PHASE_1,
     PHASE_2,
+    ONESHOT,
     OFF,
     NONE,
 };
@@ -46,7 +47,7 @@ void init_timer();
 
 void output_sound(SOUND_STATE set_sound_state = SOUND_STATE::NONE)
 {
-    static SOUND_STATE sound_state = SOUND_STATE::OFF;
+    static SOUND_STATE sound_state = SOUND_STATE::ONESHOT;
 
     if (set_sound_state != SOUND_STATE::NONE)
     {
@@ -78,6 +79,10 @@ void output_sound(SOUND_STATE set_sound_state = SOUND_STATE::NONE)
         }
         sound_state = SOUND_STATE::PHASE_1;
         break;
+    case SOUND_STATE::ONESHOT:
+        ledcWriteNote(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), NOTE_G, 5);
+        sound_state = SOUND_STATE::OFF;
+        break;
     case SOUND_STATE::OFF:
         ledcWriteTone(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), 0);
         break;
@@ -86,7 +91,7 @@ void output_sound(SOUND_STATE set_sound_state = SOUND_STATE::NONE)
     }
 }
 
-hw_timer_t *timer = NULL;
+hw_timer_t *timer = nullptr;
 void IRAM_ATTR on_timer()
 {
     output_sound();
@@ -106,16 +111,9 @@ void init_timer()
     timerAlarmWrite(timer, 5000, true);
 }
 
-void setup()
+void init_wifi()
 {
-    Serial.begin(115200);
-    delay(100);
-
-    init_pin();
-    init_timer();
-
     Serial.print("\nConnecting...");
-
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     while (WiFi.status() != WL_CONNECTED)
     {
@@ -126,6 +124,16 @@ void setup()
     Serial.printf("Connected, IP address: ");
     Serial.println(WiFi.localIP());
     Serial.println();
+}
+
+void setup()
+{
+    Serial.begin(115200);
+    delay(100);
+
+    init_pin();
+    init_timer();
+    init_wifi();
 
     configTzTime("JST-9", "ntp.nict.jp");
     delay(5000);
@@ -138,27 +146,27 @@ void setup()
 
     json_spread_sheet["id"] = SPREAD_SHEET_ID;
     json_spread_sheet["sheet"] = SPREAD_SHEET_SHEET;
-    json_contents["start_client_unixtime"] = time(NULL)
+    json_contents["start_client_unixtime"] = time(NULL);
 
-        timerAlarmEnable(timer);
+    timerAlarmEnable(timer);
 }
 
 void loop()
 {
     static unsigned long last_millis = millis();
-    static unsigned long failed_count = 0;
+    static uint64_t failed_count = 0;
     static CONNECTION_STATE last_connection_state = CONNECTION_STATE::INITIAL;
 
     const unsigned long new_millis = millis();
     const unsigned long interval_millis = new_millis - last_millis;
     const time_t t = time(NULL);
     const struct tm *tm = localtime(&t);
+    String json_string;
 
     json_contents["client_unixtime"] = t;
     json_contents["interval_millis"] = interval_millis;
     json_contents["failed_count"] = failed_count;
 
-    String json_string;
     serializeJson(doc, json_string);
 
     int status_code = 0;
@@ -175,7 +183,8 @@ void loop()
     case CONNECTION_STATE::CONNECTED:
         if (last_connection_state == CONNECTION_STATE::BROKEN)
         {
-            output_sound(SOUND_STATE::OFF);
+            timerWrite(timer, 0);
+            output_sound(SOUND_STATE::ONESHOT);
         }
         last_millis = new_millis;
         failed_count = 0;
@@ -196,5 +205,5 @@ void loop()
 
     last_connection_state = connection_state;
 
-    // Serial.printf("POST %d|%s\n", status_code, json_string.c_str());
+    Serial.printf("POST %d|%s\n", status_code, json_string.c_str());
 }
