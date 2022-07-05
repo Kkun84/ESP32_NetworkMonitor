@@ -6,24 +6,23 @@
 #include "define.h"
 
 #define PIN_SPEAKER_OUTPUT 33
+#define PIN_LIGHT_OUTPUT 32
 #define PIN_DEBUG_INPUT 23
 
 enum class LEDC_CHANNEL
 {
-    SPEAKER
+    SPEAKER,
 };
 
 enum class TIMER_NUM
 {
-    SPEAKER
+    SPEAKER,
 };
 
-enum class SOUND_STATE
+enum class SPEAKER_STATE
 {
     OFF,
-    ONESHOT,
     ON,
-    NONE,
 };
 
 enum class CONNECTION_STATE
@@ -39,83 +38,80 @@ StaticJsonDocument<JSON_OBJECT_SIZE(2) + JSON_OBJECT_SIZE(2) + JSON_OBJECT_SIZE(
 JsonObject json_contents;
 CONNECTION_STATE connection_state = CONNECTION_STATE::INITIAL;
 
-void IRAM_ATTR on_timer();
-void init_pin();
-void init_timer();
-
-void output_sound(SOUND_STATE set_sound_state)
+void output_speaker(CONNECTION_STATE connection_state)
 {
-    static SOUND_STATE sound_state = SOUND_STATE::ONESHOT;
+    static SPEAKER_STATE speaker_state = SPEAKER_STATE::OFF;
+    static uint8_t speaker_on_phase = 0;
+    static uint8_t speaker_off_phase = 0;
 
-    if (set_sound_state != SOUND_STATE::NONE)
+    switch (connection_state)
     {
-        sound_state = set_sound_state;
+    case CONNECTION_STATE::CONNECTING:
+        break;
+    case CONNECTION_STATE::CONNECTED:
+        speaker_state = SPEAKER_STATE::OFF;
+        break;
+    case CONNECTION_STATE::BROKEN:
+        speaker_state = SPEAKER_STATE::ON;
+        break;
+    default:
+        return;
     }
 
-    static uint8_t sound_phase = 0;
-
-    switch (sound_state)
+    switch (speaker_state)
     {
-    case SOUND_STATE::ON:
-        switch (sound_phase)
+    case SPEAKER_STATE::ON:
+        switch (speaker_on_phase)
         {
         default:
-            sound_phase = 0;
         case 0:
+            speaker_on_phase = 0;
             ledcWriteNote(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), NOTE_B, 4);
             break;
         case 1:
             ledcWriteNote(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), NOTE_G, 4);
             break;
         }
-        sound_phase += 1;
+        speaker_on_phase += 1;
+        speaker_off_phase = 0;
         break;
-    case SOUND_STATE::ONESHOT:
-        sound_phase = 0;
-        ledcWriteNote(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), NOTE_G, 5);
-        sound_state = SOUND_STATE::OFF;
-        break;
-    case SOUND_STATE::OFF:
-        sound_phase = 0;
-        ledcWriteTone(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), 0);
+    case SPEAKER_STATE::OFF:
+        switch (speaker_off_phase)
+        {
+        default:
+        case 0:
+            ledcWriteNote(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), NOTE_G, 5);
+            break;
+        case 1:
+            ledcWriteTone(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), 0);
+            break;
+        }
+        speaker_on_phase = 0;
+        speaker_off_phase = 1;
         break;
     default:
-        break;
+        return;
     }
 }
 
-hw_timer_t *timer = nullptr;
-void IRAM_ATTR on_timer()
+hw_timer_t *timer_speaker = nullptr;
+void IRAM_ATTR on_timer_speaker()
 {
-    switch (connection_state)
-    {
-    case CONNECTION_STATE::INITIAL:
-        output_sound(SOUND_STATE::NONE);
-        break;
-    case CONNECTION_STATE::CONNECTING:
-        output_sound(SOUND_STATE::NONE);
-        break;
-    case CONNECTION_STATE::CONNECTED:
-        output_sound(SOUND_STATE::OFF);
-        break;
-    case CONNECTION_STATE::BROKEN:
-        output_sound(SOUND_STATE::ON);
-        break;
-    }
+    output_speaker(connection_state);
 }
 
 void init_pin()
 {
-    pinMode(PIN_SPEAKER_OUTPUT, OUTPUT);
     pinMode(PIN_DEBUG_INPUT, INPUT_PULLUP);
     ledcAttachPin(PIN_SPEAKER_OUTPUT, static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER));
+    pinMode(PIN_LIGHT_OUTPUT, OUTPUT);
 }
 
 void init_timer()
 {
-    timer = timerBegin(static_cast<uint8_t>(TIMER_NUM::SPEAKER), getApbFrequency() / 1000 * 1000 * 1000, true);
-    timerAttachInterrupt(timer, &on_timer, true);
-    timerAlarmWrite(timer, 5000, true);
+    timer_speaker = timerBegin(static_cast<uint8_t>(TIMER_NUM::SPEAKER), getApbFrequency() / 1000 * 1000 * 1000, true);
+    timerAttachInterrupt(timer_speaker, &on_timer_speaker, true);
+    timerAlarmWrite(timer_speaker, 5000, true);
 }
 
 void init_wifi()
@@ -155,7 +151,9 @@ void setup()
     json_spread_sheet["sheet"] = SPREAD_SHEET_SHEET;
     json_contents["start_client_unixtime"] = time(NULL);
 
-    timerAlarmEnable(timer);
+    timerWrite(timer_speaker, 0);
+    output_speaker(connection_state);
+    timerAlarmEnable(timer_speaker);
 }
 
 void loop()
@@ -168,6 +166,8 @@ void loop()
     const unsigned long interval_millis = new_millis - last_millis;
     const time_t t = time(NULL);
     const struct tm *tm = localtime(&t);
+
+    int status_code = 0;
     String json_string;
 
     json_contents["client_unixtime"] = t;
@@ -176,32 +176,26 @@ void loop()
 
     serializeJson(doc, json_string);
 
-    int status_code = 0;
     connection_state = CONNECTION_STATE::CONNECTING;
     if (digitalRead(PIN_DEBUG_INPUT))
     {
         status_code = http_client.POST(json_string);
     }
-
     connection_state = (status_code == 200) ? CONNECTION_STATE::CONNECTED : CONNECTION_STATE::BROKEN;
+
+    if (last_connection_state != connection_state)
+    {
+        timerWrite(timer_speaker, 0);
+        output_speaker(connection_state);
+    }
 
     switch (connection_state)
     {
     case CONNECTION_STATE::CONNECTED:
-        if (last_connection_state == CONNECTION_STATE::BROKEN)
-        {
-            timerWrite(timer, 0);
-            output_sound(SOUND_STATE::ONESHOT);
-        }
         last_millis = new_millis;
         failed_count = 0;
         break;
     case CONNECTION_STATE::BROKEN:
-        if (last_connection_state == CONNECTION_STATE::CONNECTED)
-        {
-            timerWrite(timer, 0);
-            on_timer();
-        }
         failed_count += 1;
         delay(10);
         break;
@@ -211,6 +205,8 @@ void loop()
     }
 
     last_connection_state = connection_state;
+
+    digitalWrite(PIN_LIGHT_OUTPUT, !digitalRead(PIN_LIGHT_OUTPUT));
 
     Serial.printf("POST %d|%s\n", status_code, json_string.c_str());
 }
