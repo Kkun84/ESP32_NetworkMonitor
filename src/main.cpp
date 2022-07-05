@@ -20,11 +20,9 @@ enum class TIMER_NUM
 
 enum class SOUND_STATE
 {
-    INITIAL,
-    PHASE_1,
-    PHASE_2,
-    ONESHOT,
     OFF,
+    ONESHOT,
+    ON,
     NONE,
 };
 
@@ -45,7 +43,7 @@ void IRAM_ATTR on_timer();
 void init_pin();
 void init_timer();
 
-void output_sound(SOUND_STATE set_sound_state = SOUND_STATE::NONE)
+void output_sound(SOUND_STATE set_sound_state)
 {
     static SOUND_STATE sound_state = SOUND_STATE::ONESHOT;
 
@@ -54,36 +52,31 @@ void output_sound(SOUND_STATE set_sound_state = SOUND_STATE::NONE)
         sound_state = set_sound_state;
     }
 
+    static uint8_t sound_phase = 0;
+
     switch (sound_state)
     {
-    case SOUND_STATE::INITIAL:
-    case SOUND_STATE::PHASE_1:
-        if (connection_state == CONNECTION_STATE::CONNECTING)
+    case SOUND_STATE::ON:
+        switch (sound_phase)
         {
-            ledcWriteTone(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), 0);
-        }
-        else
-        {
+        default:
+            sound_phase = 0;
+        case 0:
             ledcWriteNote(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), NOTE_B, 4);
-        }
-        sound_state = SOUND_STATE::PHASE_2;
-        break;
-    case SOUND_STATE::PHASE_2:
-        if (connection_state == CONNECTION_STATE::CONNECTING)
-        {
-            ledcWriteTone(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), 0);
-        }
-        else
-        {
+            break;
+        case 1:
             ledcWriteNote(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), NOTE_G, 4);
+            break;
         }
-        sound_state = SOUND_STATE::PHASE_1;
+        sound_phase += 1;
         break;
     case SOUND_STATE::ONESHOT:
+        sound_phase = 0;
         ledcWriteNote(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), NOTE_G, 5);
         sound_state = SOUND_STATE::OFF;
         break;
     case SOUND_STATE::OFF:
+        sound_phase = 0;
         ledcWriteTone(static_cast<uint8_t>(LEDC_CHANNEL::SPEAKER), 0);
         break;
     default:
@@ -94,7 +87,21 @@ void output_sound(SOUND_STATE set_sound_state = SOUND_STATE::NONE)
 hw_timer_t *timer = nullptr;
 void IRAM_ATTR on_timer()
 {
-    output_sound();
+    switch (connection_state)
+    {
+    case CONNECTION_STATE::INITIAL:
+        output_sound(SOUND_STATE::NONE);
+        break;
+    case CONNECTION_STATE::CONNECTING:
+        output_sound(SOUND_STATE::NONE);
+        break;
+    case CONNECTION_STATE::CONNECTED:
+        output_sound(SOUND_STATE::OFF);
+        break;
+    case CONNECTION_STATE::BROKEN:
+        output_sound(SOUND_STATE::ON);
+        break;
+    }
 }
 
 void init_pin()
@@ -193,7 +200,7 @@ void loop()
         if (last_connection_state == CONNECTION_STATE::CONNECTED)
         {
             timerWrite(timer, 0);
-            output_sound(SOUND_STATE::INITIAL);
+            on_timer();
         }
         failed_count += 1;
         delay(10);
